@@ -1,3 +1,15 @@
+// Package cache provides a thread-safe, in-memory LRU (Least Recently Used) cache
+// with optional per-key TTL (Time To Live) expiration.
+//
+// The cache uses a doubly linked list paired with a hash map to guarantee O(1)
+// time complexity for both Get and Set operations. A background goroutine
+// automatically evicts expired keys once per minute.
+//
+// Example usage:
+//
+//	cache := cache.NewLRUCache(100)
+//	cache.Set("username", 42, 60000) // expires in 60 seconds
+//	val := cache.Get("username")     // returns 42
 package cache
 
 import (
@@ -6,16 +18,8 @@ import (
 	"time"
 )
 
-// cache
-// we'll have a map
-// you can add items to the map
-// you can remove items from the map
-// multiple people can read from the map
-// only one would be able to update it
-
-// we'll have a ttl set on each item
-// every minute we have routine what checks ttl for each item and remove it
-
+// LRUCache is a thread-safe, in-memory cache with LRU eviction and per-key TTL support.
+// Use NewLRUCache to create an instance.
 type LRUCache struct {
 	capacity   int
 	linkedList linkedList
@@ -36,23 +40,26 @@ type linkedList struct {
 	tail *node
 }
 
+// NewLRUCache creates and returns a new LRUCache with the specified maximum capacity.
+// Once the cache is full, the least recently used item is evicted to make room.
+// A background goroutine is automatically started to sweep expired keys every minute.
 func NewLRUCache(capacity int) *LRUCache {
 	lruCache := &LRUCache{}
-	lruCache.linkedList = linkedList{}
 	lruCache.store = make(map[string]*node)
-
 	lruCache.capacity = capacity
 
 	go lruCache.startCleanupRoutine()
 	return lruCache
 }
 
+// Get retrieves the value associated with the given key.
+// If the key does not exist or has expired, it returns -1.
+// Accessing a key marks it as the most recently used item.
 func (cache *LRUCache) Get(key string) int64 {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
 	node, ok := cache.store[key]
-
 	if !ok {
 		return -1
 	}
@@ -64,10 +71,13 @@ func (cache *LRUCache) Get(key string) int64 {
 
 	cache.linkedList.MoveToTail(node)
 	return node.value
-
 }
 
-// ttl in milli seconds
+// Set inserts or updates a key-value pair in the cache.
+// ttlInMs is the time-to-live for the key in milliseconds.
+// Pass 0 to store the key without an expiration.
+// Pass a negative value to use the default TTL of 1 year.
+// If the cache is at capacity, the least recently used item is evicted.
 func (cache *LRUCache) Set(key string, val int64, ttlInMs int64) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -108,6 +118,8 @@ func (cache *LRUCache) deleteLocked(key string) {
 	delete(cache.store, key)
 }
 
+// Delete removes the entry with the given key from the cache.
+// It is a no-op if the key does not exist.
 func (cache *LRUCache) Delete(key string) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -115,26 +127,25 @@ func (cache *LRUCache) Delete(key string) {
 	cache.deleteLocked(key)
 }
 
+// startCleanupRoutine runs a blocking loop that sweeps the cache every minute,
+// removing any entries whose TTL has expired. It is intended to be run in a goroutine.
 func (cache *LRUCache) startCleanupRoutine() {
-
 	ticker := time.NewTicker(1 * time.Minute)
 
-	func() {
-		for {
-			<-ticker.C
-			cache.mu.Lock()
-			curr := cache.linkedList.head
+	for {
+		<-ticker.C
+		cache.mu.Lock()
+		curr := cache.linkedList.head
 
-			for curr != nil {
-				next := curr.next
-				if !curr.ttl.IsZero() && time.Now().After(curr.ttl) {
-					cache.deleteLocked(curr.key)
-				}
-				curr = next
+		for curr != nil {
+			next := curr.next
+			if !curr.ttl.IsZero() && time.Now().After(curr.ttl) {
+				cache.deleteLocked(curr.key)
 			}
-			cache.mu.Unlock()
+			curr = next
 		}
-	}()
+		cache.mu.Unlock()
+	}
 }
 
 func (list *linkedList) Append(val int64, key string, ttl time.Time) *node {

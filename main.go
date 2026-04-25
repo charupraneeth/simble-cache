@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 // cache
@@ -16,7 +17,7 @@ import (
 // every minute we have routine what checks ttl for each item and remove it
 
 type LRUCache struct {
-	capacity   int64
+	capacity   int
 	linkedList LinkedList
 	store      map[string]*Node
 	mu         sync.Mutex
@@ -27,6 +28,7 @@ type Node struct {
 	next  *Node
 	prev  *Node
 	key   string
+	ttl   time.Time
 }
 
 type LinkedList struct {
@@ -34,13 +36,14 @@ type LinkedList struct {
 	tail *Node
 }
 
-func NewLRUCache(capacity int64) *LRUCache {
+func NewLRUCache(capacity int) *LRUCache {
 	lruCache := &LRUCache{}
 	lruCache.linkedList = LinkedList{}
 	lruCache.store = make(map[string]*Node)
 
 	lruCache.capacity = capacity
 
+	go lruCache.startCleanupRoutine()
 	return lruCache
 }
 
@@ -54,31 +57,88 @@ func (cache *LRUCache) Get(key string) int64 {
 		return -1
 	}
 
+	if !node.ttl.IsZero() && time.Now().After(node.ttl) {
+		cache.deleteLocked(key)
+		return -1
+	}
+
 	cache.linkedList.MoveToTail(node)
 	return node.value
 
 }
 
-func (cache *LRUCache) Set(key string, val int64) {
+// ttl in milli seconds
+func (cache *LRUCache) Set(key string, val int64, ttlInMs int64) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+
+	if ttlInMs < 0 {
+		ttlInMs = 1000 * 60 * 60 * 24 * 365 // set default to 1 year
+	}
 
 	node := cache.store[key]
 	if node != nil {
 		node.value = val
+		if ttlInMs > 0 {
+			node.ttl = time.Now().Add(time.Duration(ttlInMs) * time.Millisecond)
+		}
 		cache.linkedList.MoveToTail(node)
 	} else {
 		if len(cache.store)+1 > int(cache.capacity) {
 			delete(cache.store, cache.linkedList.head.key)
 			cache.linkedList.Remove(cache.linkedList.head)
 		}
-		newNode := cache.linkedList.Append(val, key)
+		var actualTTL time.Time
+		if ttlInMs > 0 {
+			actualTTL = time.Now().Add(time.Duration(ttlInMs) * time.Millisecond)
+		}
+		newNode := cache.linkedList.Append(val, key, actualTTL)
 		cache.store[key] = newNode
 	}
 }
 
-func (list *LinkedList) Append(val int64, key string) *Node {
-	newNode := &Node{value: val, key: key}
+func (cache *LRUCache) deleteLocked(key string) {
+	node := cache.store[key]
+
+	if node == nil {
+		return
+	}
+
+	cache.linkedList.Remove(node)
+	delete(cache.store, key)
+}
+
+func (cache *LRUCache) Delete(key string) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	cache.deleteLocked(key)
+}
+
+func (cache *LRUCache) startCleanupRoutine() {
+
+	ticker := time.NewTicker(1 * time.Minute)
+
+	func() {
+		for {
+			<-ticker.C
+			cache.mu.Lock()
+			curr := cache.linkedList.head
+
+			for curr != nil {
+				next := curr.next
+				if !curr.ttl.IsZero() && time.Now().After(curr.ttl) {
+					cache.deleteLocked(curr.key)
+				}
+				curr = next
+			}
+			cache.mu.Unlock()
+		}
+	}()
+}
+
+func (list *LinkedList) Append(val int64, key string, ttl time.Time) *Node {
+	newNode := &Node{value: val, key: key, ttl: ttl}
 
 	// Handle the empty list scenario
 	if list.tail == nil {
@@ -128,44 +188,6 @@ func (list *LinkedList) PrintAll() {
 	}
 }
 
-func (list *LinkedList) Reverse() {
-	if list.head == nil {
-		return
-	}
-
-	list.tail = list.head
-
-	var prev *Node
-	curr := list.head
-
-	for curr != nil {
-		next := curr.next
-		curr.next = prev
-		prev = curr
-		curr = next
-	}
-
-	list.head = prev
-}
-
-func (list *LinkedList) HasCycle() bool {
-	slow := list.head
-	fast := list.head
-
-	for fast != nil && fast.next != nil {
-
-		slow = slow.next
-
-		fast = fast.next.next
-
-		if slow == fast {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (list *LinkedList) Remove(n *Node) {
 
 	if n == nil {
@@ -208,7 +230,7 @@ func main() {
 			key := fmt.Sprintf("key-%d", workerID%10) // Only 10 unique keys, forcing lots of evictions and overwrites
 
 			// Concurrently write
-			cache.Set(key, int64(workerID))
+			cache.Set(key, int64(workerID), -1)
 
 			// Concurrently read
 			cache.Get(key)

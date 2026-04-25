@@ -1,4 +1,4 @@
-package main
+package cache
 
 import (
 	"fmt"
@@ -18,28 +18,28 @@ import (
 
 type LRUCache struct {
 	capacity   int
-	linkedList LinkedList
-	store      map[string]*Node
+	linkedList linkedList
+	store      map[string]*node
 	mu         sync.Mutex
 }
 
-type Node struct {
+type node struct {
 	value int64
-	next  *Node
-	prev  *Node
+	next  *node
+	prev  *node
 	key   string
 	ttl   time.Time
 }
 
-type LinkedList struct {
-	head *Node
-	tail *Node
+type linkedList struct {
+	head *node
+	tail *node
 }
 
 func NewLRUCache(capacity int) *LRUCache {
 	lruCache := &LRUCache{}
-	lruCache.linkedList = LinkedList{}
-	lruCache.store = make(map[string]*Node)
+	lruCache.linkedList = linkedList{}
+	lruCache.store = make(map[string]*node)
 
 	lruCache.capacity = capacity
 
@@ -137,8 +137,8 @@ func (cache *LRUCache) startCleanupRoutine() {
 	}()
 }
 
-func (list *LinkedList) Append(val int64, key string, ttl time.Time) *Node {
-	newNode := &Node{value: val, key: key, ttl: ttl}
+func (list *linkedList) Append(val int64, key string, ttl time.Time) *node {
+	newNode := &node{value: val, key: key, ttl: ttl}
 
 	// Handle the empty list scenario
 	if list.tail == nil {
@@ -154,7 +154,7 @@ func (list *LinkedList) Append(val int64, key string, ttl time.Time) *Node {
 	return newNode
 }
 
-func (list *LinkedList) MoveToTail(node *Node) {
+func (list *linkedList) MoveToTail(node *node) {
 	// 1. If it's already the tail, do nothing!
 	if node == list.tail {
 		return
@@ -178,7 +178,7 @@ func (list *LinkedList) MoveToTail(node *Node) {
 	}
 }
 
-func (list *LinkedList) PrintAll() {
+func (list *linkedList) PrintAll() {
 	temp := list.head
 
 	for temp != nil {
@@ -188,7 +188,7 @@ func (list *LinkedList) PrintAll() {
 	}
 }
 
-func (list *LinkedList) Remove(n *Node) {
+func (list *linkedList) Remove(n *node) {
 
 	if n == nil {
 		return
@@ -210,37 +210,4 @@ func (list *LinkedList) Remove(n *Node) {
 
 	n.prev = nil
 	n.next = nil
-}
-
-func main() {
-	cache := NewLRUCache(50) // slightly larger capacity for the test
-
-	// A WaitGroup waits for a collection of goroutines to finish
-	var wg sync.WaitGroup
-
-	fmt.Println("Starting stress test...")
-
-	// Spawn 1,000 goroutines hitting the cache at the same time
-	for i := 0; i < 1000; i++ {
-		wg.Add(1)
-
-		go func(workerID int) {
-			defer wg.Done()
-
-			key := fmt.Sprintf("key-%d", workerID%10) // Only 10 unique keys, forcing lots of evictions and overwrites
-
-			// Concurrently write
-			cache.Set(key, int64(workerID), -1)
-
-			// Concurrently read
-			cache.Get(key)
-
-		}(i)
-	}
-
-	// Block until all 1,000 goroutines are done
-	wg.Wait()
-
-	fmt.Println("Stress test complete! Cache state:")
-	cache.linkedList.PrintAll()
 }
